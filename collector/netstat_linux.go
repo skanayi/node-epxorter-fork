@@ -6,6 +6,7 @@
 // http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
+// Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
@@ -27,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
@@ -37,6 +39,7 @@ const (
 
 var (
 	netStatFields = kingpin.Flag("collector.netstat.fields", "Regexp of fields to return for netstat collector.").Default("^(.*_(InErrors|InErrs)|Ip_Forwarding|Ip(6|Ext)_(InOctets|OutOctets)|Icmp6?_(InMsgs|OutMsgs)|TcpExt_(Listen.*|Syncookies.*|TCPSynRetrans|TCPTimeouts)|Tcp_(ActiveOpens|InSegs|OutSegs|OutRsts|PassiveOpens|RetransSegs|CurrEstab)|Udp6?_(InDatagrams|OutDatagrams|NoPorts|RcvbufErrors|SndbufErrors))$").String()
+	logger        log.Logger
 )
 
 type netStatCollector struct {
@@ -45,6 +48,7 @@ type netStatCollector struct {
 }
 
 func init() {
+
 	registerCollector("netstat", defaultEnabled, NewNetStatCollector)
 }
 
@@ -59,11 +63,11 @@ func NewNetStatCollector(logger log.Logger) (Collector, error) {
 }
 
 func (c *netStatCollector) Update(ch chan<- prometheus.Metric) error {
-	netStats, err := getNetStats(procFilePath("net/netstat"))
+	netStats, err := getNetStats(procFilePath("net/netstat"), c.logger)
 	if err != nil {
 		return fmt.Errorf("couldn't get netstats: %w", err)
 	}
-	snmpStats, err := getNetStats(procFilePath("net/snmp"))
+	snmpStats, err := getNetStats(procFilePath("net/snmp"), c.logger)
 	if err != nil {
 		return fmt.Errorf("couldn't get SNMP stats: %w", err)
 	}
@@ -102,17 +106,20 @@ func (c *netStatCollector) Update(ch chan<- prometheus.Metric) error {
 	return nil
 }
 
-func getNetStats(fileName string) (map[string]map[string]string, error) {
+func getNetStats(fileName string, logger log.Logger) (map[string]map[string]string, error) {
 	file, err := os.Open(fileName)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	return parseNetStats(file, fileName)
+	return parseNetStats(file, fileName, logger)
 }
 
-func parseNetStats(r io.Reader, fileName string) (map[string]map[string]string, error) {
+func parseNetStats(r io.Reader, fileName string, logger log.Logger) (map[string]map[string]string, error) {
+
+	level.Debug(logger).Log("msg", "parsing net stats for", "company", "mycom", "name", fileName)
+
 	var (
 		netStats = map[string]map[string]string{}
 		scanner  = bufio.NewScanner(r)
@@ -122,15 +129,40 @@ func parseNetStats(r io.Reader, fileName string) (map[string]map[string]string, 
 		nameParts := strings.Split(scanner.Text(), " ")
 		scanner.Scan()
 		valueParts := strings.Split(scanner.Text(), " ")
-		// Remove trailing :.
-		protocol := nameParts[0][:len(nameParts[0])-1]
-		netStats[protocol] = map[string]string{}
-		if len(nameParts) != len(valueParts) {
-			return nil, fmt.Errorf("mismatch field count mismatch in %s: %s",
-				fileName, protocol)
-		}
-		for i := 1; i < len(nameParts); i++ {
-			netStats[protocol][nameParts[i]] = valueParts[i]
+		level.Debug(logger).Log("msg", "parsing net stats for", "company", "mycom", "name", fileName)
+		level.Debug(logger).Log("msg", "name part is", "nameparts", strings.Join(nameParts, ","), "name", fileName)
+		level.Debug(logger).Log("msg", "name part zero is", "nameparts", nameParts[0], "name", fileName)
+
+		if len(nameParts[0]) > 0 {
+
+			// Remove trailing :.
+			protocol := nameParts[0][:len(nameParts[0])-1]
+			level.Debug(logger).Log("msg", "protocol is", "protocols", protocol, "name", fileName)
+
+			netStats[protocol] = map[string]string{}
+			if len(nameParts) != len(valueParts) {
+				return nil, fmt.Errorf("mismatch field count mismatch in %s: %s",
+					fileName, protocol)
+			}
+			for i := 1; i < len(nameParts); i++ {
+				netStats[protocol][nameParts[i]] = valueParts[i]
+			}
+		} else {
+
+			level.Debug(logger).Log("msg", "length of name space part is zero", "company", "mycom", "name", fileName)
+			tmp, err := os.Create("/tmp/node_exporter_file")
+			if err != nil {
+				level.Debug(logger).Log("msg", "cannot create mp node exporter file", "company", "mycom", "name", fileName)
+				return netStats, err
+			}
+			_, err = io.Copy(tmp, r)
+			if err != nil {
+				level.Debug(logger).Log("msg", "cannot copy to temp file", "company", "mycom", "name", fileName)
+				return netStats, err
+			}
+			tmp.Close()
+			return netStats, fmt.Errorf("length of nameparts under parseNetStats is zero %s ", fileName)
+
 		}
 	}
 
